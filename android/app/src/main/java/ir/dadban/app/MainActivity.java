@@ -78,6 +78,8 @@ public final class MainActivity extends Activity {
     private WebView webView;
     private WebView printWebView;
     private final ExecutorService aiExecutor = Executors.newFixedThreadPool(3);
+    private final ExecutorService catalogExecutor = Executors.newSingleThreadExecutor();
+    private LegalCatalogStore legalCatalogStore;
     private byte[] pendingWordBytes;
     private long backgroundedAt;
 
@@ -87,6 +89,7 @@ public final class MainActivity extends Activity {
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_SECURE);
         getWindow().getDecorView().setLayoutDirection(View.LAYOUT_DIRECTION_RTL);
 
+        legalCatalogStore = new LegalCatalogStore(getApplicationContext());
         webView = new WebView(this);
         webView.setLayoutDirection(View.LAYOUT_DIRECTION_RTL);
         setContentView(webView);
@@ -141,7 +144,7 @@ public final class MainActivity extends Activity {
         try {
             String html = readAsset("index.html");
             String styles = readAsset("styles.css");
-            String legalData = Base64.encodeToString(readAsset("legal-data.json").getBytes(StandardCharsets.UTF_8), Base64.NO_WRAP);
+            String legalData = Base64.encodeToString(readOptionalAsset("legal-data.json", "[]").getBytes(StandardCharsets.UTF_8), Base64.NO_WRAP);
             String addressData = Base64.encodeToString(readAsset("address-data.json").getBytes(StandardCharsets.UTF_8), Base64.NO_WRAP);
             String inflationData = Base64.encodeToString(readAsset("inflation-data.json").getBytes(StandardCharsets.UTF_8), Base64.NO_WRAP);
             String inheritanceData = Base64.encodeToString(readAsset("inheritance-data.json").getBytes(StandardCharsets.UTF_8), Base64.NO_WRAP);
@@ -164,6 +167,14 @@ public final class MainActivity extends Activity {
             int count;
             while ((count = input.read(buffer)) != -1) output.write(buffer, 0, count);
             return output.toString("UTF-8");
+        }
+    }
+
+    private String readOptionalAsset(String name, String fallback) {
+        try {
+            return readAsset(name);
+        } catch (IOException ignored) {
+            return fallback;
         }
     }
 
@@ -198,6 +209,67 @@ public final class MainActivity extends Activity {
         public boolean securePut(String key, String value) {
             if (!isAllowedStorageKey(key) || value == null || value.length() > 2_000_000) return false;
             return encryptPreference(key, value);
+        }
+
+        @JavascriptInterface
+        public String getLegalCatalogCategories() {
+            try {
+                return legalCatalogStore == null ? "[]" : legalCatalogStore.getCategories().toString();
+            } catch (Exception error) {
+                return "[]";
+            }
+        }
+
+        @JavascriptInterface
+        public String queryLegalCatalog(String categoryId, String query, int offset, int limit) {
+            try {
+                if (offset < 0 || offset > 1_000_000) return "[]";
+                return legalCatalogStore == null ? "[]" :
+                        legalCatalogStore.queryAuthorities(categoryId, query, offset, limit).toString();
+            } catch (Exception error) {
+                return "[]";
+            }
+        }
+
+        @JavascriptInterface
+        public String getLegalCatalogItem(String id) {
+            try {
+                if (legalCatalogStore == null) return "";
+                JSONObject item = legalCatalogStore.getAuthority(id);
+                return item == null ? "" : item.toString();
+            } catch (Exception error) {
+                return "";
+            }
+        }
+
+        @JavascriptInterface
+        public String getLegalCatalogStats() {
+            try {
+                return legalCatalogStore == null ? "{}" : legalCatalogStore.getStats().toString();
+            } catch (Exception error) {
+                return "{}";
+            }
+        }
+
+        @JavascriptInterface
+        public void refreshLegalCatalog(String requestId) {
+            if (requestId == null || !requestId.matches("[A-Za-z0-9._:-]{1,80}")) return;
+            if (legalCatalogStore == null) {
+                sendLegalCatalogResult(requestId, false, "مخزن محلی کاتالوگ در دسترس نیست.");
+                return;
+            }
+            catalogExecutor.execute(() -> {
+                try {
+                    JSONObject stats = legalCatalogStore.syncFromSupabase(
+                            BuildConfig.SUPABASE_URL,
+                            BuildConfig.SUPABASE_PUBLISHABLE_KEY
+                    );
+                    sendLegalCatalogResult(requestId, true, stats.toString());
+                } catch (Exception error) {
+                    sendLegalCatalogResult(requestId, false,
+                            "همگام‌سازی کاتالوگ انجام نشد: " + limit(error.getMessage(), 300));
+                }
+            });
         }
 
         @JavascriptInterface
@@ -449,6 +521,19 @@ public final class MainActivity extends Activity {
                 "window.onLegalAiResult&&window.onLegalAiResult(" + safeId + "," + success + "," + safeMessage + ")", null));
     }
 
+    private void sendLegalCatalogResult(String requestId, boolean success, String message) {
+        if (webView == null) return;
+        String safeId = JSONObject.quote(requestId == null ? "" : requestId);
+        String safeMessage = JSONObject.quote(message == null ? "" : message);
+        runOnUiThread(() -> {
+            if (webView != null) {
+                webView.evaluateJavascript(
+                        "window.onLegalCatalogResult&&window.onLegalCatalogResult(" +
+                                safeId + "," + success + "," + safeMessage + ")", null);
+            }
+        });
+    }
+
     private SecretKey getOrCreateSecretKey() throws Exception {
         KeyStore keyStore = KeyStore.getInstance("AndroidKeyStore");
         keyStore.load(null);
@@ -678,5 +763,20 @@ public final class MainActivity extends Activity {
     @Override protected void onStop() { super.onStop(); if (!isChangingConfigurations()) backgroundedAt = System.currentTimeMillis(); }
     @Override protected void onResume() { super.onResume(); if (backgroundedAt > 0 && System.currentTimeMillis() - backgroundedAt >= AUTO_LOCK_DELAY_MS && webView != null) webView.evaluateJavascript("window.lockOfficeIfNeeded&&window.lockOfficeIfNeeded()", null); backgroundedAt = 0; }
     @Override public void onBackPressed() { handleBackPressed(); }
-    @Override protected void onDestroy() { aiExecutor.shutdownNow(); if (printWebView != null) printWebView.destroy(); if (webView != null) { webView.removeJavascriptInterface("LawyerApp"); webView.loadUrl("about:blank"); webView.destroy(); webView = null; } super.onDestroy(); }
+    @Override protected void onDestroy() {
+        aiExecutor.shutdownNow();
+        catalogExecutor.shutdownNow();
+        if (legalCatalogStore != null) {
+            legalCatalogStore.close();
+            legalCatalogStore = null;
+        }
+        if (printWebView != null) printWebView.destroy();
+        if (webView != null) {
+            webView.removeJavascriptInterface("LawyerApp");
+            webView.loadUrl("about:blank");
+            webView.destroy();
+            webView = null;
+        }
+        super.onDestroy();
+    }
 }
