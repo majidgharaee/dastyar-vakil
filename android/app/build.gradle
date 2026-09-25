@@ -7,6 +7,9 @@ def releaseAlias = System.getenv("DV_KEY_ALIAS")
 def releaseStorePassword = System.getenv("DV_KEYSTORE_PASSWORD")
 def releaseKeyPassword = System.getenv("DV_KEY_PASSWORD")
 def releaseSigningReady = [releaseStore, releaseAlias, releaseStorePassword, releaseKeyPassword].every { it != null && !it.trim().isEmpty() }
+def supabaseUrl = System.getenv("DV_SUPABASE_URL") ?: "https://dmhnibhyglkxobyuicdu.supabase.co"
+def supabasePublishableKey = System.getenv("DV_SUPABASE_PUBLISHABLE_KEY") ?: ""
+def buildConfigString = { String value -> "\"" + value.replace("\\", "\\\\").replace("\"", "\\\"") + "\"" }
 
 android {
     namespace "ir.dadban.app"
@@ -18,6 +21,12 @@ android {
         targetSdk 37
         versionCode 10
         versionName "9.0.0"
+        buildConfigField "String", "SUPABASE_URL", buildConfigString(supabaseUrl)
+        buildConfigField "String", "SUPABASE_PUBLISHABLE_KEY", buildConfigString(supabasePublishableKey)
+    }
+
+    buildFeatures {
+        buildConfig true
     }
 
     buildTypes {
