@@ -8,7 +8,7 @@ def releaseStorePassword = System.getenv("DV_KEYSTORE_PASSWORD")
 def releaseKeyPassword = System.getenv("DV_KEY_PASSWORD")
 def releaseSigningReady = [releaseStore, releaseAlias, releaseStorePassword, releaseKeyPassword].every { it != null && !it.trim().isEmpty() }
 def supabaseUrl = System.getenv("DV_SUPABASE_URL") ?: "https://dmhnibhyglkxobyuicdu.supabase.co"
-def supabasePublishableKey = System.getenv("DV_SUPABASE_PUBLISHABLE_KEY") ?: ""
+def supabasePublishableKey = System.getenv("DV_SUPABASE_PUBLISHABLE_KEY") ?: "sb_publishable_pvKcFs7k6psNmCPAR8Uv5g_I9ap9D58"
 def buildConfigString = { String value -> "\"" + value.replace("\\", "\\\\").replace("\"", "\\\"") + "\"" }
 
 android {
