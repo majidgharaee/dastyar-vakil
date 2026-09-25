@@ -1,0 +1,36 @@
+plugins {
+    id "com.android.application"
+}
+
+def releaseStore = System.getenv("DV_KEYSTORE_PATH")
+def releaseAlias = System.getenv("DV_KEY_ALIAS")
+def releaseStorePassword = System.getenv("DV_KEYSTORE_PASSWORD")
+def releaseKeyPassword = System.getenv("DV_KEY_PASSWORD")
+def releaseSigningReady = [releaseStore, releaseAlias, releaseStorePassword, releaseKeyPassword].every { it != null && !it.trim().isEmpty() }
+
+android {
+    namespace "ir.dadban.app"
+    compileSdk 37
+
+    defaultConfig {
+        applicationId "ir.dadban.app"
+        minSdk 23
+        targetSdk 37
+        versionCode 10
+        versionName "9.0.0"
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled true
+            shrinkResources true
+            proguardFiles getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro"
+        }
+    }
+}
+
+gradle.taskGraph.whenReady { graph ->
+    if (graph.allTasks.any { it.name.toLowerCase().contains("release") } && !releaseSigningReady) {
+        throw new GradleException("Release signing variables are required; unsigned release output is forbidden.")
+    }
+}

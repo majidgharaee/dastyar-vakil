@@ -1,0 +1,16 @@
+/.gradle/
+/**/build/
+/release-v070/
+/delivery-v070/
+/local.properties
+*.jks
+*.keystore
+*.p12
+*.pem
+edge-*/
+**/Login Data
+**/History
+**/Cookies
+**/Web Data
+**/Local State
+*.log
