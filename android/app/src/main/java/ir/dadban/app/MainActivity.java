@@ -1,6 +1,7 @@
 package ir.dadban.app;
 
 import android.Manifest;
+import android.annotation.SuppressLint;
 import android.app.Activity;
 import android.app.AlarmManager;
 import android.app.AlertDialog;
@@ -80,6 +81,7 @@ public final class MainActivity extends Activity {
     private final ExecutorService aiExecutor = Executors.newFixedThreadPool(3);
     private final ExecutorService catalogExecutor = Executors.newSingleThreadExecutor();
     private LegalCatalogStore legalCatalogStore;
+    private DirectoryStore directoryStore;
     private byte[] pendingWordBytes;
     private long backgroundedAt;
 
@@ -90,6 +92,7 @@ public final class MainActivity extends Activity {
         getWindow().getDecorView().setLayoutDirection(View.LAYOUT_DIRECTION_RTL);
 
         legalCatalogStore = new LegalCatalogStore(getApplicationContext());
+        directoryStore = new DirectoryStore(getApplicationContext());
         webView = new WebView(this);
         webView.setLayoutDirection(View.LAYOUT_DIRECTION_RTL);
         setContentView(webView);
@@ -268,6 +271,58 @@ public final class MainActivity extends Activity {
                 } catch (Exception error) {
                     sendLegalCatalogResult(requestId, false,
                             "همگام‌سازی کاتالوگ انجام نشد: " + limit(error.getMessage(), 300));
+                }
+            });
+        }
+
+        @JavascriptInterface
+        public String getDirectoryGroups() {
+            try { return directoryStore == null ? "[]" : directoryStore.getGroups().toString(); }
+            catch (Exception error) { return "[]"; }
+        }
+
+        @JavascriptInterface
+        public String getDirectorySubgroups(String groupCode) {
+            try { return directoryStore == null ? "[]" : directoryStore.getSubgroups(groupCode).toString(); }
+            catch (Exception error) { return "[]"; }
+        }
+
+        @JavascriptInterface
+        public String queryDirectory(String groupCode, String subgroupCode, String query, int offset, int limit) {
+            try {
+                if (offset < 0 || offset > 1_000_000) return "[]";
+                return directoryStore == null ? "[]" : directoryStore.queryEntities(groupCode, subgroupCode, query, offset, limit).toString();
+            } catch (Exception error) { return "[]"; }
+        }
+
+        @JavascriptInterface
+        public String getDirectoryItem(String id) {
+            try {
+                if (directoryStore == null) return "";
+                JSONObject item = directoryStore.getEntity(id);
+                return item == null ? "" : item.toString();
+            } catch (Exception error) { return ""; }
+        }
+
+        @JavascriptInterface
+        public String getDirectoryStats() {
+            try { return directoryStore == null ? "{}" : directoryStore.getStats().toString(); }
+            catch (Exception error) { return "{}"; }
+        }
+
+        @JavascriptInterface
+        public void refreshDirectory(String requestId) {
+            if (requestId == null || !requestId.matches("[A-Za-z0-9._:-]{1,80}")) return;
+            if (directoryStore == null) {
+                sendDirectoryResult(requestId, false, "مخزن محلی نشانی‌ها در دسترس نیست.");
+                return;
+            }
+            catalogExecutor.execute(() -> {
+                try {
+                    JSONObject stats = directoryStore.syncFromSupabase(BuildConfig.SUPABASE_URL, BuildConfig.SUPABASE_PUBLISHABLE_KEY);
+                    sendDirectoryResult(requestId, true, stats.toString());
+                } catch (Exception error) {
+                    sendDirectoryResult(requestId, false, "همگام‌سازی نشانی‌ها انجام نشد: " + limit(error.getMessage(), 300));
                 }
             });
         }
@@ -534,6 +589,19 @@ public final class MainActivity extends Activity {
         });
     }
 
+    private void sendDirectoryResult(String requestId, boolean success, String message) {
+        if (webView == null) return;
+        String safeId = JSONObject.quote(requestId == null ? "" : requestId);
+        String safeMessage = JSONObject.quote(message == null ? "" : message);
+        runOnUiThread(() -> {
+            if (webView != null) {
+                webView.evaluateJavascript(
+                        "window.onDirectoryResult&&window.onDirectoryResult(" +
+                                safeId + "," + success + "," + safeMessage + ")", null);
+            }
+        });
+    }
+
     private SecretKey getOrCreateSecretKey() throws Exception {
         KeyStore keyStore = KeyStore.getInstance("AndroidKeyStore");
         keyStore.load(null);
@@ -762,6 +830,7 @@ public final class MainActivity extends Activity {
     @Override protected void onSaveInstanceState(Bundle outState) { super.onSaveInstanceState(outState); }
     @Override protected void onStop() { super.onStop(); if (!isChangingConfigurations()) backgroundedAt = System.currentTimeMillis(); }
     @Override protected void onResume() { super.onResume(); if (backgroundedAt > 0 && System.currentTimeMillis() - backgroundedAt >= AUTO_LOCK_DELAY_MS && webView != null) webView.evaluateJavascript("window.lockOfficeIfNeeded&&window.lockOfficeIfNeeded()", null); backgroundedAt = 0; }
+    @SuppressLint("GestureBackNavigation")
     @Override public void onBackPressed() { handleBackPressed(); }
     @Override protected void onDestroy() {
         aiExecutor.shutdownNow();
@@ -769,6 +838,10 @@ public final class MainActivity extends Activity {
         if (legalCatalogStore != null) {
             legalCatalogStore.close();
             legalCatalogStore = null;
+        }
+        if (directoryStore != null) {
+            directoryStore.close();
+            directoryStore = null;
         }
         if (printWebView != null) printWebView.destroy();
         if (webView != null) {

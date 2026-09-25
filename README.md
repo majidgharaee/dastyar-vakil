@@ -1,6 +1,6 @@
-# Dastyar Vakil v10 — Cloud Foundation
+# Dastyar Vakil v10.0.0 — Cloud Catalog and Directory
 
-This branch establishes the backend/data foundation for Dastyar Vakil while preserving v9 as the stable Android baseline.
+This branch upgrades the v9 Android application in place. It preserves package `ir.dadban.app` and local user storage while moving the legal catalog and directory primary sources to the public, RLS-protected Supabase APIs. Persistent SQLite mirrors provide offline cache and the bundled legacy data is fallback-only.
 
 ## DEV environment
 Supabase project: `dastyar-vakil-dev`
@@ -32,9 +32,12 @@ All buckets are private in DEV.
 - No client/case documents belong in Git.
 - v9 remains the stable baseline during migration.
 
-## Next
-1. Storage RLS policies through supported Storage administration path.
-2. v9 local-data → cloud migration layer.
-3. Legal corpus normalization and provenance.
-4. Hybrid search.
-5. Server-side AI gateway with citation validation.
+## Android release
+- `versionName=10.0.0`, `versionCode=11`
+- package remains `ir.dadban.app`
+- only `DV_SUPABASE_PUBLISHABLE_KEY` is accepted by the Android data layer
+- `catalog_only`, `unverified`, and `rag_eligible` are surfaced in the UI
+- records with `rag_eligible=false` are prohibited from being presented to AI as authoritative text
+- build with `android/tools/build_release_v10.ps1`
+
+See `docs/v10/CHANGELOG-v10.0.0.md` and `docs/v10/QA-REPORT-v10.0.0.md`.
