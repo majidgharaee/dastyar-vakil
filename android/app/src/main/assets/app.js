@@ -61,6 +61,53 @@ const laws=fullLegalResources.some(x=>x.type==='law')?fullLegalResources.filter(
 const catalogs=fullLegalResources.filter(x=>x.type==='unity'||x.type==='opinion');
 const resources=[...laws,...catalogs,...templates.filter(x=>x.type!=='pleading')];
 
+let legalCatalogStats={authorities:0,categories:0,links:0,default_taxonomy:'',last_synced_at:''};
+let dynamicLawCategories=[];
+let activeLawCategoryId='';
+let lawCatalogOffset=0;
+const LAW_CATALOG_PAGE_SIZE=50;
+
+function parseNativeJson(raw,fallback){
+ try{return raw?JSON.parse(raw):fallback;}catch(error){console.error('Invalid native catalog JSON',error);return fallback;}
+}
+function refreshLocalLegalCatalog(){
+ if(!nativeApp?.getLegalCatalogStats)return false;
+ legalCatalogStats=parseNativeJson(nativeApp.getLegalCatalogStats(),legalCatalogStats);
+ const cats=parseNativeJson(nativeApp.getLegalCatalogCategories?.(),[]);
+ dynamicLawCategories=Array.isArray(cats)?cats:[];
+ return Number(legalCatalogStats.authorities||0)>0;
+}
+function queryNativeLegalCatalog(categoryId='',query='',offset=0,limit=LAW_CATALOG_PAGE_SIZE){
+ if(!nativeApp?.queryLegalCatalog)return[];
+ return parseNativeJson(nativeApp.queryLegalCatalog(categoryId||'',query||'',offset,limit),[]);
+}
+function nativeLegalCatalogItem(id){
+ if(!nativeApp?.getLegalCatalogItem)return null;
+ return parseNativeJson(nativeApp.getLegalCatalogItem(id),null);
+}
+function catalogStatusLabel(x){
+ if(x?.content_status==='full_text'&&x?.verification_status==='official_verified')return'متن کامل رسمی تأییدشده';
+ if(x?.content_status==='full_text')return'متن کامل — در انتظار تأیید رسمی';
+ if(x?.content_status==='partial_text')return'متن ناقص / در حال تکمیل';
+ return'فقط عنوان — متن در حال تکمیل';
+}
+function catalogItemMarkup(x){
+ return `<article class="list-item legal-item"><div class="list-item-head"><div><span class="badge">${esc(x.type_label||'مرجع حقوقی')}</span><strong>${esc(x.title)}</strong></div><span class="badge ${x.has_full_text?'ready':'beta'}">${esc(catalogStatusLabel(x))}</span></div><p>${x.has_full_text?'متن این مرجع در مخزن محتوایی ثبت شده است.':'این عنوان در کاتالوگ مرجع ثبت شده، اما متن کامل آن هنوز وارد یا اعتبارسنجی نشده است.'}</p><div class="meta-row"><span>شناسه پایدار: ${esc(x.id)}</span>${x.review?'<span>نیازمند کنترل تطبیق عنوان</span>':''}</div><div class="card-actions"><button class="text-button" data-open-catalog-document="${esc(x.id)}">مشاهده مشخصات</button></div></article>`;
+}
+function startLegalCatalogSync(){
+ refreshLocalLegalCatalog();
+ if(!nativeApp?.refreshLegalCatalog)return;
+ nativeApp.refreshLegalCatalog(`catalog-${Date.now()}`);
+}
+window.onLegalCatalogResult=(requestId,success,message)=>{
+ if(!success){console.warn('Legal catalog sync:',message);return;}
+ refreshLocalLegalCatalog();
+ if($('.page.active')?.dataset.page==='library'){
+   const active=$('.filter-row [data-filter].active')?.dataset.filter||'all';
+   renderLibrary(active,value('#librarySearch'));
+ }
+};
+
 const calculators=[
  {id:'diyah',emoji:'🩺',title:'محاسبه دیه',group:'دعاوی و اجرا',mode:'percent',label:'مبلغ دیه کامل',rateLabel:'درصد دیه',defaultRate:1,help:'ارش و صدمات مرکب نیازمند نظر تخصصی‌اند.'},
  {id:'inheritance',emoji:'🌳',title:'محاسبه سهم‌الارث',group:'خانواده و ارث',mode:'inheritance',label:'خالص ترکه',rateLabel:'وراث',defaultRate:0,help:'محاسبه آفلاین طبقه اول پس از کسر دیون، وصیت نافذ و حقوق مقدم ترکه.'},
@@ -160,7 +207,7 @@ function mapSearch(query){if(nativeApp?.openMap)nativeApp.openMap(query);else op
 
 function normalizeSearch(v){return latin(v).replace(/\s+/g,' ').trim().toLowerCase();}
 function resourceHaystack(x){return normalizeSearch(`${x.title} ${x.meta} ${x.summary} ${x.materials||''} ${x.content}`);}
-const lawCategories=[
+const fallbackLawCategories=[
  ['حقوقی','مدنی|آیین دادرسی.*مدنی|مسئولیت مدنی|اجرای احکام'],['کیفری','مجازات|کیفری|تعزیرات|جرایم'],['اقتصادی','تجارت|شرکت|ورشکستگی|اقتصاد'],
  ['اداری','اداری|استخدام|خدمات کشوری'],['بیمه','بیمه|تأمین اجتماعی'],['موجر و مستأجر','موجر|مستأجر|اجاره'],
  ['ثبت و اسناد','ثبت اسناد|املاک|دفتر اسناد'],['بین‌الملل','بین الملل|بین‌المللی|داوری تجاری'],['حاکمیتی','اساسی|مجلس|دولت'],
@@ -169,21 +216,66 @@ const lawCategories=[
  ['اراضی و املاک','زمین|اراضی|آپارتمان|غیرمنقول'],['میراث فرهنگی','میراث فرهنگی'],['انتخابات','انتخابات'],
  ['محیط زیست','محیط زیست'],['اوقاف','وقف|اوقاف'],['آموزش و پرورش','آموزش|دانشگاه'],
  ['حمل و نقل','حمل|راه|خودرو'],['شهر و شهرداری','شهرداری|شوراهای اسلامی'],['مالکیت معنوی','مالکیت فکری|مؤلف|اختراع|علامت']
-];
-function lawsForCategory(name){const pattern=lawCategories.find(x=>x[0]===name)?.[1]||'';return laws.filter(x=>new RegExp(pattern,'i').test(normalizeSearch(`${x.title} ${x.summary}`)));}
-function lawCategoryMarkup(){return `<h2 class="unity-category-title">دسته‌بندی قوانین</h2><div class="law-category-grid">${lawCategories.map(([name],i)=>{const count=lawsForCategory(name).length;return `<button class="law-category-card" type="button" data-law-category="${esc(name)}" ${count?'':'disabled'}><span style="--law-accent:hsl(${(i*47)%360} 55% 43%)">⚖</span><strong>${esc(name)}</strong><small>${fa(count)} قانون</small></button>`;}).join('')}</div>`;}
+].map(([name,pattern])=>({id:`fallback:${name}`,name,pattern,count:null,fallback:true}));
+function lawsForFallbackCategory(category){return laws.filter(x=>new RegExp(category.pattern||'','i').test(normalizeSearch(`${x.title} ${x.summary}`)));}
+function currentLawCategories(){return dynamicLawCategories.length?dynamicLawCategories:fallbackLawCategories.map(x=>({...x,count:lawsForFallbackCategory(x).length}));}
+function lawCategoryMarkup(){
+ const categories=currentLawCategories();
+ return `<h2 class="unity-category-title">دسته‌بندی قوانین</h2><div class="law-category-grid">${categories.map((category,i)=>{const count=Number(category.count||0);return `<button class="law-category-card" type="button" data-law-category-id="${esc(category.id)}" ${count?'':'disabled'}><span style="--law-accent:hsl(${(i*47)%360} 55% 43%)">⚖</span><strong>${esc(category.name)}</strong><small>${fa(count)} عنوان</small></button>`;}).join('')}</div>`;
+}
+function renderLawCategory(categoryId,append=false){
+ const category=currentLawCategories().find(x=>String(x.id)===String(categoryId));if(!category)return;
+ activeLawCategoryId=categoryId;
+ if(category.fallback){
+   const items=lawsForFallbackCategory(category);
+   $('#libraryList').innerHTML=`<button type="button" class="back-button" data-law-back>→ بازگشت به دسته‌بندی قوانین</button><h2>${esc(category.name)}</h2>`+items.map(x=>`<button class="list-item" data-open-document="${x.id}"><strong>${esc(x.title)}</strong><p>${esc(x.summary)}</p><span>←</span></button>`).join('');
+   return;
+ }
+ if(!append)lawCatalogOffset=0;
+ const items=queryNativeLegalCatalog(categoryId,'',lawCatalogOffset,LAW_CATALOG_PAGE_SIZE);
+ const head=append?'':`<button type="button" class="back-button" data-law-back>→ بازگشت به دسته‌بندی قوانین</button><h2>${esc(category.name)}</h2><div class="search-summary">${fa(category.count||0)} عنوان در این دسته</div><div id="catalogLawList"></div><div id="catalogLawMore"></div>`;
+ if(!append)$('#libraryList').innerHTML=head;
+ const list=$('#catalogLawList');
+ if(list)list.insertAdjacentHTML('beforeend',items.map(catalogItemMarkup).join(''));
+ lawCatalogOffset+=items.length;
+ const more=$('#catalogLawMore');
+ if(more)more.innerHTML=lawCatalogOffset<Number(category.count||0)&&items.length===LAW_CATALOG_PAGE_SIZE?`<button type="button" class="secondary-button full-width" data-law-load-more="${esc(categoryId)}">نمایش موارد بیشتر</button>`:'';
+}
 function renderLibrary(filter='all',query=''){
- const n=normalizeSearch(query);const items=resources.filter(x=>(filter==='all'||x.type===filter)&&(!n||resourceHaystack(x).includes(n)));
- if($('#lawCount'))$('#lawCount').textContent=`${fa(laws.filter(x=>x.status==='متن کامل منبع').length)} عنوان`;
+ const n=normalizeSearch(query);
+ const catalogReady=Number(legalCatalogStats.authorities||0)>0;
+ if($('#lawCount'))$('#lawCount').textContent=`${fa(catalogReady?legalCatalogStats.authorities:laws.length)} عنوان`;
  if($('#unityCount'))$('#unityCount').textContent=`${fa(catalogs.filter(x=>x.type==='unity').length)} رأی`;
  if($('#opinionCount'))$('#opinionCount').textContent=`${fa(catalogs.filter(x=>x.type==='opinion').length)} نظریه`;
  if(filter==='law'&&!n){$('#libraryList').innerHTML=lawCategoryMarkup();return;}
+ if(filter==='law'&&n&&catalogReady){
+   const items=queryNativeLegalCatalog('',query,0,100);
+   $('#libraryList').innerHTML=`<div class="search-summary">${fa(items.length)} نتیجه در عنوان‌های کاتالوگ</div>`+(items.map(catalogItemMarkup).join('')||'<div class="empty-state">عنوانی پیدا نشد.</div>');
+   return;
+ }
+ const items=resources.filter(x=>(filter==='all'||x.type===filter)&&(!n||resourceHaystack(x).includes(n))&&!(catalogReady&&x.type==='law'));
  $('#libraryList').innerHTML=items.map(x=>`<article class="list-item legal-item"><div class="list-item-head"><div><span class="badge">${x.typeLabel}</span><strong>${esc(x.title)}</strong></div><span class="badge ready">${esc(x.status)}</span></div><p>${esc(x.summary)}</p><div class="meta-row"><span>${esc(x.meta)}</span>${x.materials?`<span>${esc(x.materials)}</span>`:''}</div><div class="card-actions"><button class="text-button" data-open-document="${x.id}">مطالعه متن</button>${x.source&&x.type!=='pleading'?`<button class="text-button" data-external-url="${x.source}">مشاهده منبع</button>`:''}</div></article>`).join('')||'<div class="empty-state">نتیجه‌ای پیدا نشد. شماره ماده را با رقم فارسی یا لاتین نیز امتحان کنید.</div>';
 }
 function lawSections(content){const lines=String(content||'').split(/\n+/).map(x=>x.trim()).filter(Boolean),sections=[];let current={title:'مقدمه و مواد آغازین',lines:[],start:null,end:null};const article=/^ماده\s+([۰-۹0-9]+)/;for(const line of lines){const match=line.match(article);const heading=!match&&/^(جلد|کتاب|باب|فصل|مبحث|گفتار|بخش)\s*(?:[آ-ی۰-۹0-9]+)?\s*[:\-–]/.test(line);if(heading&&current.lines.length){sections.push(current);current={title:line,lines:[],start:null,end:null};continue;}current.lines.push(line);if(match){const number=latin(match[1]);if(!current.start)current.start=number;current.end=number;}}if(current.lines.length)sections.push(current);return sections.map((s,i)=>({...s,id:`law-section-${i}`,range:s.start?`مواد ${fa(s.start)}${s.end&&s.end!==s.start?` تا ${fa(s.end)}`:''}`:'بدون شماره ماده'}));}
 function openDocument(id){const x=resources.find(r=>r.id===id);if(!x)return;const full=x.status==='متن کامل منبع'||x.status==='متن کامل آفلاین';if(x.type==='law'&&full){const sections=lawSections(x.content);$('#documentView').innerHTML=`<span class="badge">قانون</span><h1 id="documentTitle">${esc(x.title)}</h1><div class="meta-row"><span>${esc(x.meta)}</span><span>${fa(sections.length)} فصل یا بخش</span></div><div class="search-box compact law-inner-search"><input type="search" placeholder="جستجو در مواد این قانون…"><button type="button">⌕</button></div><div class="law-section-list">${sections.map(s=>`<details class="law-section" data-law-haystack="${esc(normalizeSearch(s.lines.join(' ')))}"><summary><span>☷</span><strong>${esc(s.title)}</strong><small>${esc(s.range)}</small></summary><div class="preserve-lines">${esc(s.lines.join('\n\n'))}</div></details>`).join('')}</div><div class="article-actions"><button data-external-url="${x.source}">منبع سند</button></div>`;showPage('document');const input=$('.law-inner-search input');input?.addEventListener('input',()=>{$$('.law-section').forEach(section=>{section.hidden=!section.dataset.lawHaystack.includes(normalizeSearch(input.value));});});return;}$('#documentView').innerHTML=`<span class="badge">${x.typeLabel}</span><h1 id="documentTitle">${esc(x.title)}</h1><div class="meta-row"><span>${esc(x.meta)}</span><span>${esc(x.status)}</span></div><section class="article"><h2>${full?'متن کامل':'چکیده نمایه‌شده'}</h2><p class="preserve-lines">${esc(x.content)}</p><div class="article-actions">${x.source?`<button data-external-url="${x.source}">${full?'منبع سند':'مشاهده متن کامل در منبع'}</button>`:''}${x.type!=='law'&&x.type!=='unity'&&x.type!=='opinion'?`<button data-share-resource="${x.id}">اشتراک نمونه</button>`:''}</div></section>`;showPage('document');}
+function openCatalogDocument(id){
+ const x=nativeLegalCatalogItem(id);if(!x)return toast('مدخل کاتالوگ در دسترس نیست.');
+ const status=catalogStatusLabel(x);
+ $('#documentView').innerHTML=`<span class="badge">${esc(x.type_label||'مرجع حقوقی')}</span><h1 id="documentTitle">${esc(x.title)}</h1><div class="meta-row"><span>${esc(status)}</span><span>${esc(x.verification_status||'unverified')}</span></div><section class="article"><h2>وضعیت محتوا</h2><p>${x.has_full_text?'متن این مرجع در مخزن محتوایی ثبت شده است؛ نمایش نسخه رسمی و تاریخچه اعتبار در مرحله اتصال خوانش نسخه‌ها فعال می‌شود.':'این عنوان در کاتالوگ جامع ثبت شده است، اما متن کامل آن هنوز وارد یا با منبع معتبر تأیید نشده است. تا زمان تکمیل، این مدخل فقط برای فهرست و جست‌وجوی عنوان استفاده می‌شود و منبع پاسخ حقوقی هوش مصنوعی محسوب نمی‌شود.'}</p></section>${x.review?'<div class="notice-card warning"><strong>کنترل هویت سند</strong><p>عنوان مشابهی در فرایند ورود داده شناسایی شده است. ادغام خودکار انجام نشده و تطبیق نهایی با منبع معتبر لازم است.</p></div>':''}<div class="source-note"><b>شناسه پایدار</b><span dir="ltr">${esc(x.id)}</span></div>`;
+ showPage('document');
+}
 function searchScore(x,n){const title=normalizeSearch(x.title),materials=normalizeSearch(x.materials||''),summary=normalizeSearch(x.summary||''),content=normalizeSearch(x.content||'');return(title===n?1000:title.includes(n)?500:0)+(materials.includes(n)?250:0)+(summary.includes(n)?100:0)+(content.includes(n)?20:0)+(x.type==='law'?6:x.type==='unity'?4:x.type==='opinion'?2:0);}
-function runSearch(query){const n=normalizeSearch(query);$('#resultSearch').value=query;if(!n){$('#searchResultList').innerHTML='<div class="empty-state">یک کلمه، عبارت، شماره رأی یا شماره ماده وارد کنید.</div>';showPage('search');return;}const items=resources.filter(x=>resourceHaystack(x).includes(n)).sort((a,b)=>searchScore(b,n)-searchScore(a,n));$('#searchResultList').innerHTML=`<div class="search-summary">${fa(items.length)} نتیجه در قوانین، آرا، نظریات و نمونه‌ها</div>`+(items.map(x=>`<article class="list-item"><span class="badge">${x.typeLabel}</span><strong>${esc(x.title)}</strong><p>${esc(x.summary)}</p><button class="text-button" data-open-document="${x.id}">مشاهده</button></article>`).join('')||`<div class="empty-state">برای «${esc(query)}» نتیجه‌ای پیدا نشد.</div>`);showPage('search');}
+function runSearch(query){
+ const n=normalizeSearch(query);$('#resultSearch').value=query;
+ if(!n){$('#searchResultList').innerHTML='<div class="empty-state">یک کلمه، عبارت، شماره رأی یا شماره ماده وارد کنید.</div>';showPage('search');return;}
+ const catalogReady=Number(legalCatalogStats.authorities||0)>0;
+ const catalogItems=catalogReady?queryNativeLegalCatalog('',query,0,100):[];
+ const items=resources.filter(x=>resourceHaystack(x).includes(n)&&!(catalogReady&&x.type==='law')).sort((a,b)=>searchScore(b,n)-searchScore(a,n));
+ const catalogMarkup=catalogItems.map(x=>`<article class="list-item"><span class="badge">${esc(x.type_label||'مرجع حقوقی')}</span><strong>${esc(x.title)}</strong><p>${esc(catalogStatusLabel(x))}</p><button class="text-button" data-open-catalog-document="${esc(x.id)}">مشاهده</button></article>`).join('');
+ const resourceMarkup=items.map(x=>`<article class="list-item"><span class="badge">${x.typeLabel}</span><strong>${esc(x.title)}</strong><p>${esc(x.summary)}</p><button class="text-button" data-open-document="${x.id}">مشاهده</button></article>`).join('');
+ $('#searchResultList').innerHTML=`<div class="search-summary">${fa(catalogItems.length+items.length)} نتیجه در کاتالوگ، آرا، نظریات و نمونه‌ها</div>`+(catalogMarkup+resourceMarkup||`<div class="empty-state">برای «${esc(query)}» نتیجه‌ای پیدا نشد.</div>`);
+ showPage('search');
+}
 
 function calculatorCard(x){const authoritative=['inheritance','late','date','loan'].includes(x.id);return `<button class="calculator-card" data-calculator="${x.id}"><span class="emoji">${x.emoji}</span><strong>${x.title}</strong><small>${x.group}</small><span class="calc-status ${authoritative?'reviewed':'estimate'}">${authoritative?'مبنای آفلاین مشخص':'برآورد با نرخ ورودی'}</span></button>`;}
 function renderCalculators(query=''){const grid=$('#calculatorGrid');if(!grid)return;const n=normalizeSearch(query);const items=calculators.filter(x=>!n||normalizeSearch(`${x.title} ${x.group}`).includes(n));grid.innerHTML=items.map(x=>calculatorCard(x)).join('');grid.hidden=false;grid.classList.add('calculators-ready','calculators-visible');}
@@ -278,7 +370,7 @@ const aiLabels={openrouter:'OpenRouter',groq:'Groq',huggingface:'Hugging Face'},
 function aiModel(provider){return state.aiSettings[`${provider}Model`]||({openrouter:'openrouter/free',groq:'openai/gpt-oss-20b',huggingface:'openai/gpt-oss-120b'}[provider]);}
 function configuredAiProviders(){return Object.keys(aiLabels).filter(p=>!!nativeApp?.hasAiCredential?.(p));}
 function refreshAiProviderState(){for(const provider of Object.keys(aiLabels)){const input=$(`#${provider}Model`);if(input)input.value=aiModel(provider);}const configured=configuredAiProviders();const node=$('#aiProviderState');if(node)node.innerHTML=Object.keys(aiLabels).map(p=>`<span class="badge ${configured.includes(p)?'ready':'beta'}">${aiLabels[p]}: ${configured.includes(p)?'آماده':'بدون کلید'}</span>`).join('');}
-function legalAiPrompt(question){const local=resources.filter(x=>resourceHaystack(x).includes(normalizeSearch(question))).slice(0,6).map(x=>`${x.typeLabel}: ${x.title} — ${x.summary}`).join('\n');return `پرسش کاربر:\n${question}\n\nیافته‌های کتابخانه داخلی برنامه برای راستی‌آزمایی اولیه:\n${local||'مورد مستقیمی پیدا نشد.'}\n\nپاسخ را با بخش‌های ۱) صورت مسئله ۲) پرسش‌های لازم ۳) قواعد و منابع قابل کنترل ۴) ادله و اقدامات ۵) مواعد و صلاحیت ۶) عدم قطعیت‌ها ۷) اقدام بعدی بنویس.`;}
+function legalAiPrompt(question){const local=resources.filter(x=>resourceHaystack(x).includes(normalizeSearch(question))&&(x.status==='متن کامل منبع'||x.status==='متن کامل آفلاین')).slice(0,6).map(x=>`${x.typeLabel}: ${x.title} — ${x.summary}`).join('\n');return `پرسش کاربر:\n${question}\n\nمتون کامل موجود در کتابخانه داخلی برای راستی‌آزمایی اولیه:\n${local||'متن کامل تأییدشده مرتبطی در کتابخانه محلی پیدا نشد. عناوین catalog_only نباید به عنوان محتوای قانون استنباط شوند.'}\n\nپاسخ را با بخش‌های ۱) صورت مسئله ۲) پرسش‌های لازم ۳) قواعد و منابع قابل کنترل ۴) ادله و اقدامات ۵) مواعد و صلاحیت ۶) عدم قطعیت‌ها ۷) اقدام بعدی بنویس. از استنتاج مفاد قانون صرفاً از روی عنوان آن خودداری کن.`;}
 function requestAi(provider,prompt,requestId){nativeApp.askLegalAi(provider,aiModel(provider),prompt,requestId);}
 window.onLegalAiResult=(requestId,success,message)=>{const task=pendingAi.get(requestId);if(!task)return;pendingAi.delete(requestId);if(task.kind==='single'){appendMessage('bot',success?`${aiLabels[task.provider]}\n\n${message}`:`${aiLabels[task.provider]}: ${message}`);return;}if(task.kind==='synthesis'){appendMessage('bot',success?`جمع‌بندی شورای هوش مصنوعی\n\n${message}`:`جمع‌بندی شورا ناموفق بود: ${message}`);return;}const batch=task.batch;batch.results[task.provider]={success,message};batch.remaining--;if(batch.remaining>0)return;const good=Object.entries(batch.results).filter(([,r])=>r.success);good.forEach(([p,r])=>appendMessage('bot',`${aiLabels[p]}\n\n${r.message}`));if(!good.length){appendMessage('bot','هیچ‌یک از سرویس‌های تنظیم‌شده پاسخ موفق ندادند. تنظیم کلید، مدل و اتصال اینترنت را بررسی کنید.');return;}if(good.length===1)return;const synthesizer=good[0][0],synthesisId=`${batch.id}:synthesis`;const comparisons=good.map(([p,r])=>`--- پاسخ ${aiLabels[p]} ---\n${r.message.slice(0,6000)}`).join('\n\n');pendingAi.set(synthesisId,{kind:'synthesis'});requestAi(synthesizer,`پرسش اصلی:\n${batch.question}\n\n${comparisons}\n\nاین پاسخ‌ها را نقادانه ادغام کن؛ اختلاف‌ها، ادعاهای نیازمند کنترل و منابع احتمالی ساختگی را مشخص کن و یک پاسخ نهایی محتاط و کاربردی بده.`,synthesisId);};
 
@@ -289,8 +381,9 @@ function openYearIndex(type,year){const isUnity=type==='unity',items=resources.f
 function renderUnityYears(query=''){renderYearIndex('unity',query);}function openUnityYear(year){openYearIndex('unity',year);}function renderOpinionYears(query=''){renderYearIndex('opinion',query);}function openOpinionYear(year){openYearIndex('opinion',year);}
 
 document.addEventListener('click',e=>{
- if(e.target.closest('[data-law-back]')){renderLibrary('law','');return;}
- const lawCategory=e.target.closest('[data-law-category]');if(lawCategory){const items=lawsForCategory(lawCategory.dataset.lawCategory);$('#libraryList').innerHTML=`<button type="button" class="back-button" data-law-back>→ بازگشت به دسته‌بندی قوانین</button><h2>${esc(lawCategory.dataset.lawCategory)}</h2>`+items.map(x=>`<button class="list-item" data-open-document="${x.id}"><strong>${esc(x.title)}</strong><p>${esc(x.summary)}</p><span>←</span></button>`).join('');return;}
+ if(e.target.closest('[data-law-back]')){activeLawCategoryId='';renderLibrary('law','');return;}
+ const lawCategory=e.target.closest('[data-law-category-id]');if(lawCategory){renderLawCategory(lawCategory.dataset.lawCategoryId,false);return;}
+ const lawMore=e.target.closest('[data-law-load-more]');if(lawMore){renderLawCategory(lawMore.dataset.lawLoadMore,true);return;}
  const saveAi=e.target.closest('[data-save-ai]');if(saveAi){const provider=saveAi.dataset.saveAi,key=$(`#${provider}Key`).value.trim(),model=$(`#${provider}Model`).value.trim();if(!nativeApp?.saveAiCredential)return toast('تنظیم سرویس آنلاین فقط در APK فعال است.');if(!/^[A-Za-z0-9._:/-]{2,120}$/.test(model))return toast('شناسه مدل معتبر نیست.');const ok=nativeApp.saveAiCredential(provider,key);if(!ok)return toast('کلید معتبر نیست یا ذخیره‌سازی امن در دسترس نیست.');state.aiSettings[`${provider}Model`]=model;persist();$(`#${provider}Key`).value='';refreshAiProviderState();toast(key?'کلید به‌صورت رمزگذاری‌شده ذخیره شد.':'کلید سرویس حذف شد.');return;}
  const unityYearButton=e.target.closest('[data-unity-year]');if(unityYearButton)return openUnityYear(unityYearButton.dataset.unityYear);
  if(e.target.closest('[data-unity-back]'))return renderUnityYears(value('#unitySearch'));
@@ -302,6 +395,7 @@ document.addEventListener('click',e=>{
  const tab=e.target.closest('[data-office-tab]');if(tab){$$('[data-office-tab]').forEach(x=>x.classList.toggle('active',x===tab));$$('[data-office-panel]').forEach(x=>x.classList.toggle('active',x.dataset.officePanel===tab.dataset.officeTab));setOfficeMode(tab.dataset.officeTab,'list');return;}
  const mode=e.target.closest('[data-office-mode]');if(mode){const [kind,view]=mode.dataset.officeMode.split(':');setOfficeMode(kind,view);return;}
  const calc=e.target.closest('[data-calculator]');if(calc)return openCalculator(calc.dataset.calculator);
+ const catalogDoc=e.target.closest('[data-open-catalog-document]');if(catalogDoc)return openCatalogDocument(catalogDoc.dataset.openCatalogDocument);
  const doc=e.target.closest('[data-open-document]');if(doc)return openDocument(doc.dataset.openDocument);
  const edu=e.target.closest('[data-education]');if(edu)return openEducation(edu.dataset.education);
  const ext=e.target.closest('[data-external-url]');if(ext)return openExternal(ext.dataset.externalUrl);
@@ -369,6 +463,8 @@ $('#openAlarmSettings').addEventListener('click',()=>{if(nativeApp?.openAlarmSet
 window.handleNativeBack=()=>{const active=$('.page.active')?.dataset.page;if(active&&active!=='home'){showPage('home');return 'home';}return 'exit';};
 function renderAll(){renderLibrary();renderCalculators();renderEducation();renderOffice();renderProfile();renderOrders();renderCollaborators();renderAddresses();renderReminderCapability();refreshAiProviderState();lockOrShowOffice();}
 document.documentElement.dataset.theme=localStorage.getItem('lawyer_theme')||'light';
+refreshLocalLegalCatalog();
 renderAll();
+startLegalCatalogSync();
 const initialPage=location.hash.replace(/^#/,'');if(initialPage&&$(`[data-page="${initialPage}"]`)){showPage(initialPage);if(initialPage==='unity')renderUnityYears();if(initialPage==='opinions')renderOpinionYears();}
 if('serviceWorker'in navigator&&location.protocol!=='file:')window.addEventListener('load',()=>navigator.serviceWorker.register('./sw.js').catch(()=>{}));
